@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>TextLabX</title>
+
+<style>
+    body {
+        font-family: "Segoe UI", Roboto, sans-serif;
+        background: linear-gradient(135deg, #6a11cb, #2575fc);
+        margin: 0;
+        padding: 0;
+        color: #333;
+    }
+
+    .container {
+        max-width: 850px;
+        margin: 40px auto;
+        background: #ffffffdd;
+        padding: 30px;
+        border-radius: 15px;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+        backdrop-filter: blur(8px);
+    }
+
+    h1 {
+        text-align: center;
+        margin-top: 0;
+        font-size: 34px;
+        color: #222;
+    }
+
+    h2 {
+        margin-top: 40px;
+        color: #444;
+    }
+
+    .explicacion {
+        font-size: 17px;
+        line-height: 1.5;
+        margin-bottom: 25px;
+        color: #444;
+    }
+
+    .categoria-item {
+        background: #f1f1ff;
+        padding: 12px;
+        margin: 8px 0;
+        border-radius: 10px;
+        border-left: 5px solid #6a11cb;
+    }
+
+    input, textarea, select {
+        width: 100%;
+        padding: 10px;
+        margin-top: 6px;
+        margin-bottom: 12px;
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        font-size: 15px;
+    }
+
+    button {
+        background: #6a11cb;
+        color: white;
+        border: none;
+        padding: 12px 18px;
+        font-size: 16px;
+        border-radius: 10px;
+        cursor: pointer;
+        transition: 0.2s;
+        margin-right: 10px;
+    }
+
+    button:hover {
+        background: #5510a3;
+    }
+
+    .tag {
+        display: inline-block;
+        background: #2575fc;
+        color: white;
+        padding: 4px 10px;
+        border-radius: 12px;
+        margin-right: 5px;
+        margin-bottom: 5px;
+        font-size: 13px;
+    }
+
+    .resultado-box {
+        font-size: 20px;
+        margin-top: 15px;
+        background: #eaf4ff;
+        padding: 15px;
+        border-radius: 10px;
+        border-left: 6px solid #2575fc;
+        display: inline-block;
+    }
+</style>
+
+</head>
+<body>
+
+<div class="container">
+    <h1>TextLabX</h1>
+
+    <p class="explicacion">
+        <b>TextLabX</b> es un pequeño laboratorio para crear <b>modelos de clasificación de texto</b> sin necesidad de saber machine learning.
+        Primero definís tus categorías, luego agregás frases de ejemplo y finalmente entrenás el modelo.  
+        Una vez entrenado, podés escribir cualquier frase y ver cómo tu modelo la clasifica.
+    </p>
+
+   
+     <div id="trainingSection">
+        <!-- CREAR CATEGORÍAS -->
+        <h2>1. Crear categorías</h2>
+
+    <input id="nuevaCategoria" type="text" placeholder="Ej.: positivo, negativo, neutro">
+    <button onclick="agregarCategoria()">Agregar categoría</button>
+
+    <div id="listaCategorias"></div>
+
+
+    <!-- AGREGAR FRASES -->
+    <h2>2. Agregar frases de entrenamiento</h2>
+
+<select id="categoriaSeleccionada">
+    <option value="">Seleccioná una categoría...</option>
+</select>
+
+<textarea id="textoFrase" rows="3" placeholder="Escribí una frase de ejemplo..."></textarea>
+<button onclick="agregarFrase()">Agregar frase</button>
+
+<p style="margin-top:10px; font-size:14px;">
+    O subí un archivo <b>.txt</b> o <b>.csv</b> con una frase por línea para la categoría seleccionada:
+</p>
+<input type="file" id="archivoFrases" accept=".txt,.csv">
+<button onclick="agregarDesdeArchivo()">Importar desde archivo</button>
+
+<div id="frasesContainer" style="margin-top:20px;"></div>
+
+
+        <!-- ENTRENAR -->
+        <h2>3. Entrenar modelo</h2>
+    <button onclick="entrenarModelo()">Entrenar modelo</button>
+    <p id="infoModelo" style="margin-top:10px; font-size:14px; color:#333;"></p>
+</div>
+
+
+    <!-- PROBAR -->
+    <h2 id="tituloPaso4">4. Probar el modelo</h2>
+<p id="modoInfo" style="font-size:14px; color:#333;"></p>
+
+    <input id="frasePredict" type="text" placeholder="Escribí una frase para clasificar...">
+    <button onclick="predecir()">Predecir</button>
+
+    <div id="resultado" class="resultado-box" style="display:none;"></div>
+
+</div>
+
+<script>
+
+let categorias = [];
+let ejemplos = [];
+let currentModelId = null;
+
+// ========== CATEGORÍAS ==========
+function agregarCategoria() {
+    const cat = document.getElementById("nuevaCategoria").value.trim();
+    if (!cat) return;
+
+    categorias.push(cat);
+    document.getElementById("nuevaCategoria").value = "";
+
+    actualizarUI();
+}
+
+function actualizarUI() {
+    // guardar categoría seleccionada
+    const select = document.getElementById("categoriaSeleccionada");
+    const seleccionActual = select.value;
+
+    // lista visual
+    const box = document.getElementById("listaCategorias");
+    box.innerHTML = "";
+    categorias.forEach(c => {
+        box.innerHTML += `<div class="categoria-item"><b>${c}</b></div>`;
+    });
+
+    // actualizar select sin perder selección
+    select.innerHTML = `<option value="">Seleccioná una categoría...</option>`;
+    categorias.forEach(c => {
+        select.innerHTML += `<option value="${c}">${c}</option>`;
+    });
+
+    if (seleccionActual && categorias.includes(seleccionActual)) {
+        select.value = seleccionActual;
+    }
+
+    // actualizar frases agrupadas
+    const cont = document.getElementById("frasesContainer");
+    cont.innerHTML = "";
+    categorias.forEach(c => {
+        cont.innerHTML += `<h3>${c}</h3>`;
+        ejemplos
+            .filter(e => e.categoria === c)
+            .forEach(e => {
+                cont.innerHTML += `<div class="tag">${e.texto}</div>`;
+            });
+    });
+}
+
+// ========== AGREGAR FRASE MANUAL ==========
+function agregarFrase() {
+    const categoria = document.getElementById("categoriaSeleccionada").value;
+    const texto = document.getElementById("textoFrase").value.trim();
+
+    if (!categoria) {
+        alert("Primero seleccioná una categoría.");
+        return;
+    }
+    if (!texto) return;
+
+    ejemplos.push({ texto, categoria });
+    document.getElementById("textoFrase").value = "";
+
+    actualizarUI();
+}
+
+// ========== AGREGAR FRASES DESDE ARCHIVO ==========
+async function agregarDesdeArchivo() {
+    const categoria = document.getElementById("categoriaSeleccionada").value;
+    const inputArchivo = document.getElementById("archivoFrases");
+    const file = inputArchivo.files[0];
+
+    if (!categoria) {
+        alert("Primero seleccioná una categoría.");
+        return;
+    }
+    if (!file) {
+        alert("Elegí un archivo .txt o .csv.");
+        return;
+    }
+
+    const contenido = await file.text();
+    // Una frase por línea
+    const lineas = contenido
+        .split(/\r?\n/)
+        .map(l => l.trim())
+        .filter(l => l.length > 0);
+
+    if (lineas.length === 0) {
+        alert("El archivo está vacío o no tiene líneas válidas.");
+        return;
+    }
+
+    lineas.forEach(linea => {
+        ejemplos.push({ texto: linea, categoria });
+    });
+
+    inputArchivo.value = "";
+    actualizarUI();
+}
+
+// ========== ENTRENAR ==========
+async function entrenarModelo() {
+    if (ejemplos.length === 0) {
+        alert("Agregá frases antes de entrenar.");
+        return;
+    }
+
+    const res = await fetch("http://127.0.0.1:8000/train", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ ejemplos })
+    });
+
+    const data = await res.json();
+
+    if (!data.model_id) {
+        alert("Error al entrenar el modelo.");
+        return;
+    }
+
+    currentModelId = data.model_id;
+    const apiUrl = "http://127.0.0.1:8000" + data.endpoint;
+    const predictionPageUrl = window.location.href.split("?")[0] + "?model=" + currentModelId;
+
+    const info = document.getElementById("infoModelo");
+    info.innerHTML = `
+        Modelo entrenado.<br>
+        ID: <b>${currentModelId}</b><br>
+        URL de API (POST JSON): <code>${apiUrl}</code><br>
+        URL para usar en modo predicción (compartible):<br>
+        <code>${predictionPageUrl}</code>
+    `;
+
+    alert("Modelo entrenado.\n\nID: " + currentModelId +
+          "\n\nURL modo predicción:\n" + predictionPageUrl);
+}
+
+// ========== PREDECIR ==========
+async function predecir() {
+    const frase = document.getElementById("frasePredict").value.trim();
+    if (!frase) return;
+
+    if (!currentModelId) {
+        alert("Todavía no hay modelo entrenado. Entrená uno primero.");
+        return;
+    }
+
+    const res = await fetch(`http://127.0.0.1:8000/predict/${currentModelId}`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ texto: frase })
+    });
+
+    const data = await res.json();
+
+    const box = document.getElementById("resultado");
+    box.innerText = data.categoria ? ("Categoría: " + data.categoria) : "Error";
+    box.style.display = "inline-block";
+}
+
+function initFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const modelFromUrl = params.get("model");
+
+    const trainingSection = document.getElementById("trainingSection");
+    const modoInfo = document.getElementById("modoInfo");
+    const tituloPaso4 = document.getElementById("tituloPaso4");
+
+    if (modelFromUrl) {
+        // MODO SOLO PREDICCIÓN
+        currentModelId = modelFromUrl;
+        trainingSection.style.display = "none";
+        tituloPaso4.textContent = "Probar modelo (modo solo predicción)";
+        modoInfo.textContent = "Estás usando el modelo con ID: " + currentModelId;
+    } else {
+        // MODO COMPLETO (entrenar + predecir)
+        trainingSection.style.display = "block";
+        tituloPaso4.textContent = "4. Probar el modelo";
+        modoInfo.textContent = "";
+    }
+}
+
+// Ejecutar al cargar la página
+document.addEventListener("DOMContentLoaded", initFromUrl);
+
+</script>
+
+</body>
+</html>
