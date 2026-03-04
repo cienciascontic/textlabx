@@ -32,8 +32,10 @@ class Ejemplo(BaseModel):
     texto: str
     categoria: str
 
+
 class DatosEntrenamiento(BaseModel):
     ejemplos: list[Ejemplo]
+
 
 class TextoEntrada(BaseModel):
     texto: str
@@ -46,28 +48,18 @@ def home():
 
 @app.post("/train")
 def train(data: DatosEntrenamiento):
-    """
-    Recibe:
-    {
-      "ejemplos": [
-        {"texto": "...", "categoria": "..."},
-        ...
-      ]
-    }
-    Entrena un modelo nuevo, lo guarda como .pkl y devuelve un ID.
-    """
 
     textos = [e.texto for e in data.ejemplos]
     labels = [e.categoria for e in data.ejemplos]
 
- # convertir textos a embeddings semánticos
-X = embedder.encode(textos)
+    # convertir textos a embeddings semánticos
+    X = embedder.encode(textos)
 
-# clasificador
-clf = LogisticRegression(max_iter=1000)
-clf.fit(X, labels)
+    # clasificador
+    clf = LogisticRegression(max_iter=1000)
+    clf.fit(X, labels)
 
-model_local = clf
+    model_local = clf
 
     # ID único para este modelo
     model_id = uuid.uuid4().hex[:8]
@@ -85,21 +77,20 @@ model_local = clf
 
 @app.post("/predict/{model_id}")
 def predict(model_id: str, data: TextoEntrada):
-    """
-    POST /predict/{model_id}
-    body: { "texto": "frase a clasificar" }
-    """
 
     # Buscar en cache
     if model_id in model_cache:
         model = model_cache[model_id]
     else:
         model_path = os.path.join(MODEL_DIR, f"modelo_{model_id}.pkl")
+
         if not os.path.exists(model_path):
             return {"error": "Modelo no encontrado. Verificá el ID."}
+
         model = joblib.load(model_path)
         model_cache[model_id] = model
 
-   vec = embedder.encode([data.texto])
-categoria = model.predict(vec)[0]
+    vec = embedder.encode([data.texto])
+    categoria = model.predict(vec)[0]
+
     return {"categoria": categoria}
