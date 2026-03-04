@@ -4,3 +4,4 @@ scikit-learn
 joblib
 numpy
 python-multipart
+sentence-transformers
