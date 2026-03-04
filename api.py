@@ -3,13 +3,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import joblib
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.pipeline import Pipeline
-from sklearn.svm import LinearSVC
+from sentence_transformers import SentenceTransformer
+from sklearn.linear_model import LogisticRegression
 import os
 import uuid
 
 app = FastAPI()
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
 # CORS
 app.add_middleware(
@@ -60,10 +60,14 @@ def train(data: DatosEntrenamiento):
     textos = [e.texto for e in data.ejemplos]
     labels = [e.categoria for e in data.ejemplos]
 
-    model_local = Pipeline([
-        ("tfidf", TfidfVectorizer()),
-        ("clf", LinearSVC())
-    ])
+ # convertir textos a embeddings semánticos
+X = embedder.encode(textos)
+
+# clasificador
+clf = LogisticRegression(max_iter=1000)
+clf.fit(X, labels)
+
+model_local = clf
 
     model_local.fit(textos, labels)
 
@@ -98,5 +102,6 @@ def predict(model_id: str, data: TextoEntrada):
         model = joblib.load(model_path)
         model_cache[model_id] = model
 
-    categoria = model.predict([data.texto])[0]
+   vec = embedder.encode([data.texto])
+categoria = model.predict(vec)[0]
     return {"categoria": categoria}
