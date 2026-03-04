@@ -69,8 +69,6 @@ clf.fit(X, labels)
 
 model_local = clf
 
-    model_local.fit(textos, labels)
-
     # ID único para este modelo
     model_id = uuid.uuid4().hex[:8]
     model_path = os.path.join(MODEL_DIR, f"modelo_{model_id}.pkl")
