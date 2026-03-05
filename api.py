@@ -24,7 +24,8 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 
 model_cache = {}
 
-HF_API_URL = "https://router.huggingface.co/hf-inference/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
+HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL}"
 
 
 class Ejemplo(BaseModel):
@@ -45,37 +46,38 @@ def get_hf_token() -> str:
     return token.strip()
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    token = os.getenv("HF_TOKEN", "").strip()
+def embed_texts(texts):
 
-    headers = {"Authorization": f"Bearer {token}"}
+    token = os.getenv("HF_TOKEN")
 
-    payload = {
-        "inputs": texts,
-        "options": {"wait_for_model": True}
+    headers = {
+        "Authorization": f"Bearer {token}"
     }
 
-    r = requests.post(HF_API_URL, headers=headers, json=payload)
+    embeddings = []
 
-    if not r.ok:
-        raise RuntimeError(f"HuggingFace error: {r.text}")
+    for text in texts:
 
-    data = r.json()
+        payload = {
+            "inputs": text
+        }
 
-    # Si HF devuelve error JSON
-    if isinstance(data, dict) and "error" in data:
-        raise RuntimeError(data["error"])
+        r = requests.post(HF_API_URL, headers=headers, json=payload)
 
-    # Caso normal: [[embedding]]
-    if isinstance(data[0][0], float):
-        return data
+        if not r.ok:
+            raise RuntimeError(f"HuggingFace error: {r.text}")
 
-    # Caso frecuente: [[[embedding]]]
-    if isinstance(data[0][0], list):
-        return [d[0] for d in data]
+        data = r.json()
 
-    raise RuntimeError("Formato inesperado de embedding")
+        # si devuelve token embeddings
+        if isinstance(data[0], list):
+            avg = [sum(col)/len(col) for col in zip(*data)]
+            embeddings.append(avg)
 
+        else:
+            embeddings.append(data)
+
+    return embeddings
 
 @app.get("/")
 def home():
