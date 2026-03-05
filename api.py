@@ -59,8 +59,11 @@ def embed_texts(texts):
     for text in texts:
 
         payload = {
-            "inputs": text
-        }
+    "inputs": {
+        "source_sentence": text,
+        "sentences": [text]
+    }
+}
 
         r = requests.post(HF_API_URL, headers=headers, json=payload)
 
