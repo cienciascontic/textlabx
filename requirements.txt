@@ -2,6 +2,5 @@ fastapi
 uvicorn[standard]
 scikit-learn
 joblib
-numpy
 python-multipart
-sentence-transformers
+requests
