@@ -47,30 +47,35 @@ def get_hf_token() -> str:
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """
-    Devuelve embeddings (lista de vectores) usando Hugging Face Inference API.
-    """
-    token = get_hf_token()
-    if not token:
-        raise RuntimeError("Falta HF_TOKEN en variables de entorno (Render).")
+    token = os.getenv("HF_TOKEN", "").strip()
 
     headers = {"Authorization": f"Bearer {token}"}
-    payload = {"inputs": texts, "options": {"wait_for_model": True}}
 
-    r = requests.post(HF_API_URL, headers=headers, json=payload, timeout=60)
+    payload = {
+        "inputs": texts,
+        "options": {"wait_for_model": True}
+    }
+
+    r = requests.post(HF_API_URL, headers=headers, json=payload)
+
     if not r.ok:
-        raise RuntimeError(f"HF error {r.status_code}: {r.text}")
+        raise RuntimeError(f"HuggingFace error: {r.text}")
 
     data = r.json()
 
-    # Para este endpoint normalmente devuelve una lista de embeddings (uno por texto)
-    # Si HF devuelve un embedding 2D/3D raro, lo normalizamos acá.
-    if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list) and isinstance(data[0][0], (int, float)):
-        # ya es [ [384], [384], ... ]
+    # Si HF devuelve error JSON
+    if isinstance(data, dict) and "error" in data:
+        raise RuntimeError(data["error"])
+
+    # Caso normal: [[embedding]]
+    if isinstance(data[0][0], float):
         return data
 
-    # Si viene algo diferente, lo rechazamos explícitamente
-    raise RuntimeError("Respuesta inesperada de HF (estructura no reconocida).")
+    # Caso frecuente: [[[embedding]]]
+    if isinstance(data[0][0], list):
+        return [d[0] for d in data]
+
+    raise RuntimeError("Formato inesperado de embedding")
 
 
 @app.get("/")
