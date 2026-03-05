@@ -24,8 +24,7 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 
 model_cache = {}
 
-HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL}"
+HF_API_URL = "https://router.huggingface.co/hf-inference/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
 
 
 class Ejemplo(BaseModel):
