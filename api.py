@@ -1,52 +1,46 @@
 # api.py
 #
-# Versión corregida del api.py real del repo https://github.com/cienciascontic/textlabx
-# (el que efectivamente corre en textlabx.onrender.com). Pensado para reemplazar
-# ese archivo 1:1 — mismos endpoints, mismo contrato con el frontend y la extensión.
+# Versión corregida (v2) del api.py real del repo https://github.com/cienciascontic/textlabx
+# (el que corre en textlabx.onrender.com). Reemplaza 1:1 al archivo actual del repo —
+# mismos endpoints, mismo contrato con el frontend y la extensión de Scratch.
 #
-# Cambios respecto del original, de mayor a menor impacto:
+# ¿Por qué v2? La v1 de este fix cambiaba el payload de embed_texts() para pedir
+# "feature-extraction" en vez de "sentence-similarity", asumiendo que el problema
+# era solo el formato del payload. Al probarlo contra el servidor real, HuggingFace
+# devolvió: "SentenceSimilarityPipeline.__call__() missing 1 required positional
+# argument: 'sentences'". Investigando la metadata pública del modelo confirmamos
+# que sentence-transformers/all-MiniLM-L6-v2 —y en general toda la familia
+# sentence-transformers— en el proveedor "hf-inference" que se está usando SOLO
+# tiene registrada la tarea sentence-similarity. No existe combinación de payload
+# que le saque un vector de feature-extraction: esa tarea no está habilitada para
+# este modelo en ese proveedor, así que la arquitectura "pedir un embedding y
+# entrenar un LogisticRegression con esos vectores" no es viable tal como estaba.
 #
-#   1) BUG CRÍTICO en embed_texts(): el payload que se mandaba a HuggingFace
-#      ({"inputs": {"source_sentence": texto, "sentences": [texto]}}) dispara la
-#      tarea de *sentence-similarity*, no *feature-extraction*. Eso hace que la
-#      API devuelva un score de similitud del texto contra sí mismo (~1.0 siempre),
-#      no un embedding. Resultado: todas las frases terminaban representadas por
-#      (casi) el mismo número, sin importar su contenido, y el clasificador
-#      aprendía a devolver siempre la misma categoría. Se corrige a
-#      {"inputs": texto}, que es el payload correcto de feature-extraction.
+# REDISEÑO: en vez de generar embeddings y entrenar un clasificador, este archivo:
+#   - /train guarda las frases + categorías tal cual (ninguna llamada a HF; entrenar
+#     es instantáneo y no puede fallar por HuggingFace).
+#   - /predict hace UNA sola llamada a HF usando sentence-similarity (la tarea que
+#     sí funciona con este modelo): compara la frase nueva contra TODOS los
+#     ejemplos guardados en una sola request, y devuelve la categoría del ejemplo
+#     más parecido semánticamente (1-vecino-más-cercano por categoría).
 #
-#   2) /train ahora valida los datos antes de entrenar (mínimo de categorías y de
-#      ejemplos por categoría) y devuelve un diagnóstico de calidad (accuracy sobre
-#      el propio training set + qué categorías el modelo no logra distinguir) en
-#      vez de responder "ok" ciegamente sin importar si el modelo sirve o no.
-#
-#   3) /predict devuelve un 404 real (HTTPException) cuando el model_id no existe,
-#      en vez de {"error": ...} con status 200 — antes eso se colaba como una
-#      respuesta "exitosa" en el frontend y mostraba un mensaje genérico que no
-#      explicaba nada.
-#
-#   4) Se agrega un "boot_id" (un ID aleatorio generado en cada arranque del
-#      proceso). Como Render tiene disco efímero, cualquier modelo entrenado antes
-#      de un reinicio deja de existir. Con el boot_id el frontend puede detectar
-#      ese reinicio de forma proactiva (comparando el boot_id con el que tenía el
-#      servidor al entrenar/compartir el modelo) en vez de que el usuario se entere
-#      recién cuando falla una predicción.
-#
-#   5) get_hf_token() (que ya existía pero nunca se usaba) ahora sí se usa, para
-#      que un HF_TOKEN con espacios/saltos de línea de más (típico al pegarlo en
-#      el panel de Render) no rompa la autenticación en silencio.
-#
-#   6) Los errores al llamar a HuggingFace (token inválido, timeout, modelo
-#      cargando en frío, HF caído) ahora se distinguen y se devuelven como un 502
-#      con el motivo real, en vez de un 500 genérico sin explicación.
+# Otros fixes que se mantienen de la v1:
+#   - /predict devuelve 404 real (HTTPException) si el model_id no existe.
+#   - boot_id / started_at para detectar reinicios del servidor (disco efímero
+#     de Render) desde el frontend, de forma proactiva.
+#   - get_hf_token() se usa de verdad (con .strip()) para evitar tokens con
+#     espacios/saltos de línea de más.
+#   - Errores de HuggingFace (token inválido, timeout, modelo cargando en frío,
+#     HF caído) se devuelven como 502 con el motivo real, no como un 500 pelado.
+#   - /train valida categorías/ejemplos mínimos y detecta si dos categorías
+#     comparten una frase idéntica (un error de carga típico) antes de aceptar
+#     el entrenamiento.
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import joblib
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score
-from collections import Counter
+from collections import Counter, defaultdict
 import os
 import time
 import uuid
@@ -81,8 +75,7 @@ SERVER_STARTED_AT = time.time()
 
 # --- Umbrales de validación de calidad del entrenamiento ---
 MIN_CATEGORIAS = 2               # hacen falta al menos 2 categorías para clasificar
-MIN_EJEMPLOS_POR_CATEGORIA = 3   # con menos, el modelo no tiene con qué generalizar
-UMBRAL_ACCURACY_ACEPTABLE = 0.7  # por debajo de esto, avisamos que puede no ser confiable
+MIN_EJEMPLOS_POR_CATEGORIA = 2   # con menos, no hay nada contra qué comparar
 
 
 class Ejemplo(BaseModel):
@@ -103,69 +96,68 @@ def get_hf_token() -> str:
     return token.strip()
 
 
-def embed_texts(texts):
-    """
-    Pide embeddings semánticos reales (tarea feature-extraction) a la Inference
-    API de HuggingFace para sentence-transformers/all-MiniLM-L6-v2.
-
-    El payload correcto para feature-extraction es {"inputs": texto}. Un payload
-    tipo {"inputs": {"source_sentence": ..., "sentences": [...]}} dispara la tarea
-    de *sentence-similarity* en cambio, y devuelve un score de similitud (un solo
-    número) en vez de un vector de embedding — ese fue el bug que hacía que el
-    modelo entrenado predijera siempre la misma categoría.
-    """
+def _post_hf(payload: dict) -> dict:
+    """POST genérico a la Inference API de HF, con manejo de errores claro."""
     token = get_hf_token()
     if not token:
         raise RuntimeError(
             "Falta configurar la variable de entorno HF_TOKEN en el servidor "
-            "(o está vacía). Sin un token válido de HuggingFace no se pueden "
-            "calcular embeddings."
+            "(o está vacía). Sin un token válido de HuggingFace no se puede clasificar."
         )
 
     headers = {"Authorization": f"Bearer {token}"}
-    embeddings = []
 
-    for text in texts:
-        payload = {"inputs": text}
+    try:
+        r = requests.post(HF_API_URL, headers=headers, json=payload, timeout=HF_TIMEOUT_SEGUNDOS)
+    except requests.exceptions.Timeout:
+        raise RuntimeError(
+            f"HuggingFace no respondió en {HF_TIMEOUT_SEGUNDOS}s. El modelo "
+            f"'{HF_MODEL}' puede estar cargando en frío; probá de nuevo en un rato."
+        )
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"No se pudo conectar con HuggingFace: {e}")
 
-        try:
-            r = requests.post(
-                HF_API_URL, headers=headers, json=payload, timeout=HF_TIMEOUT_SEGUNDOS
-            )
-        except requests.exceptions.Timeout:
-            raise RuntimeError(
-                f"HuggingFace no respondió en {HF_TIMEOUT_SEGUNDOS}s al pedir un "
-                f"embedding. El modelo '{HF_MODEL}' puede estar cargando en frío; "
-                f"probá de nuevo en un rato."
-            )
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"No se pudo conectar con HuggingFace: {e}")
+    if r.status_code == 401:
+        raise RuntimeError(
+            "HuggingFace rechazó el token (401). Verificá que HF_TOKEN esté bien "
+            "configurado en el servidor y no haya expirado."
+        )
+    if r.status_code == 503:
+        raise RuntimeError(
+            f"El modelo '{HF_MODEL}' está cargando en HuggingFace (503). Reintentá "
+            f"en unos segundos."
+        )
+    if not r.ok:
+        raise RuntimeError(f"Error de HuggingFace ({r.status_code}): {r.text}")
 
-        if r.status_code == 401:
-            raise RuntimeError(
-                "HuggingFace rechazó el token (401). Verificá que HF_TOKEN esté "
-                "bien configurado en el servidor y no haya expirado."
-            )
-        if r.status_code == 503:
-            raise RuntimeError(
-                f"El modelo '{HF_MODEL}' está cargando en HuggingFace (503). "
-                f"Reintentá en unos segundos."
-            )
-        if not r.ok:
-            raise RuntimeError(f"Error de HuggingFace ({r.status_code}): {r.text}")
+    return r.json()
 
-        data = r.json()
 
-        # Según el backend puede devolver:
-        #  - un vector plano ya pooleado: [0.01, -0.23, ...]
-        #  - embeddings por token (lista de listas): se promedian ("mean pooling")
-        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
-            avg = [sum(col) / len(col) for col in zip(*data)]
-            embeddings.append(avg)
-        else:
-            embeddings.append(data)
+def categoria_mas_similar(texto_nuevo: str, ejemplos: list[dict]):
+    """
+    Compara `texto_nuevo` contra TODOS los ejemplos guardados en una sola llamada
+    a la tarea sentence-similarity de HF (la única que este modelo soporta en el
+    proveedor hf-inference), y devuelve la categoría del ejemplo más parecido
+    semánticamente, junto con el score de esa mejor coincidencia por categoría.
+    """
+    textos_candidatos = [e["texto"] for e in ejemplos]
 
-    return embeddings
+    payload = {
+        "inputs": {
+            "source_sentence": texto_nuevo,
+            "sentences": textos_candidatos
+        }
+    }
+    scores = _post_hf(payload)  # lista de floats, mismo orden que textos_candidatos
+
+    mejor_score_por_categoria = defaultdict(lambda: -1.0)
+    for ejemplo, score in zip(ejemplos, scores):
+        cat = ejemplo["categoria"]
+        if score > mejor_score_por_categoria[cat]:
+            mejor_score_por_categoria[cat] = score
+
+    categoria_ganadora = max(mejor_score_por_categoria, key=mejor_score_por_categoria.get)
+    return categoria_ganadora, dict(mejor_score_por_categoria)
 
 
 @app.get("/")
@@ -180,18 +172,18 @@ def home():
 
 @app.post("/train")
 def train(data: DatosEntrenamiento):
-    textos = [e.texto for e in data.ejemplos]
-    labels = [e.categoria for e in data.ejemplos]
+    ejemplos = [{"texto": e.texto, "categoria": e.categoria} for e in data.ejemplos]
+    labels = [e["categoria"] for e in ejemplos]
 
     conteo_por_categoria = dict(Counter(labels))
 
-    # --- Validaciones previas: sin esto, el modelo se entrena "a ciegas" ---
+    # --- Validaciones: sin esto, "entrenar" acepta cualquier cosa a ciegas ---
     if len(conteo_por_categoria) < MIN_CATEGORIAS:
         return {
             "status": "error",
             "error": (
                 f"Hacen falta al menos {MIN_CATEGORIAS} categorías distintas con ejemplos "
-                f"para poder entrenar un clasificador. Encontradas: {len(conteo_por_categoria)}."
+                f"para poder clasificar. Encontradas: {len(conteo_por_categoria)}."
             ),
             "conteo_por_categoria": conteo_por_categoria
         }
@@ -204,57 +196,38 @@ def train(data: DatosEntrenamiento):
             "status": "error",
             "error": (
                 f"Las categorías {', '.join(categorias_insuficientes)} tienen menos de "
-                f"{MIN_EJEMPLOS_POR_CATEGORIA} ejemplos. Con tan pocos ejemplos el modelo "
-                f"no tiene suficiente información para distinguirlas de las demás. "
-                f"Agregá más frases antes de entrenar."
+                f"{MIN_EJEMPLOS_POR_CATEGORIA} ejemplos. Agregá más frases antes de entrenar."
             ),
             "conteo_por_categoria": conteo_por_categoria
         }
 
-    # Embeddings semánticos vía HF
-    try:
-        X = embed_texts(textos)
-    except RuntimeError as e:
-        # Antes esto explotaba como un 500 sin explicación. Ahora se distingue de
-        # otros errores del servidor y se explica la causa real.
-        raise HTTPException(status_code=502, detail=str(e))
-
-    # class_weight="balanced" evita que una categoría con muchos más ejemplos que
-    # las otras termine "tapando" a las categorías minoritarias en la predicción.
-    clf = LogisticRegression(max_iter=1000, class_weight="balanced")
-    clf.fit(X, labels)
-
-    # --- Diagnóstico de calidad: ¿el modelo aprendió algo razonable? ---
-    predicciones_train = clf.predict(X)
-    train_accuracy = accuracy_score(labels, predicciones_train)
-    clases_nunca_predichas = sorted(set(labels) - set(predicciones_train))
+    # Detecta un error de carga común: la misma frase exacta cargada bajo dos
+    # categorías distintas (confunde cualquier método de clasificación).
+    categorias_por_texto = defaultdict(set)
+    for e in ejemplos:
+        categorias_por_texto[e["texto"].strip().lower()].add(e["categoria"])
+    frases_ambiguas = [t for t, cats in categorias_por_texto.items() if len(cats) > 1]
 
     advertencias = []
-    if train_accuracy < UMBRAL_ACCURACY_ACEPTABLE:
+    if frases_ambiguas:
         advertencias.append(
-            f"El modelo solo clasifica correctamente el {train_accuracy:.0%} de sus propios "
-            f"ejemplos de entrenamiento. Es probable que las frases de las distintas categorías "
-            f"se parezcan demasiado entre sí (semánticamente). Agregá ejemplos más variados y "
-            f"distintivos."
-        )
-    if clases_nunca_predichas:
-        advertencias.append(
-            "Las categorías " + ", ".join(clases_nunca_predichas) + " nunca son predichas, "
-            "ni siquiera para sus propios ejemplos de entrenamiento: otra categoría las está "
-            "'tapando'. Agregá más ejemplos distintivos para esas categorías."
+            "Estas frases están cargadas en más de una categoría a la vez, lo cual "
+            "las hace imposibles de distinguir: " + "; ".join(f'"{f}"' for f in frases_ambiguas)
         )
 
+    # No hay "entrenamiento" real que pueda fallar por HuggingFace: guardamos los
+    # ejemplos tal cual. La comparación semántica se hace en el momento de predecir.
     model_id = uuid.uuid4().hex[:8]
     model_path = os.path.join(MODEL_DIR, f"modelo_{model_id}.pkl")
 
-    joblib.dump(clf, model_path)
-    model_cache[model_id] = clf
+    modelo_guardado = {"tipo": "similaridad-hf-v1", "ejemplos": ejemplos}
+    joblib.dump(modelo_guardado, model_path)
+    model_cache[model_id] = modelo_guardado
 
     return {
         "status": "ok",
         "model_id": model_id,
         "endpoint": f"/predict/{model_id}",
-        "train_accuracy": round(train_accuracy, 4),
         "conteo_por_categoria": conteo_por_categoria,
         "advertencias": advertencias,
         "boot_id": SERVER_BOOT_ID
@@ -264,26 +237,40 @@ def train(data: DatosEntrenamiento):
 @app.post("/predict/{model_id}")
 def predict(model_id: str, data: TextoEntrada):
     if model_id in model_cache:
-        model = model_cache[model_id]
+        modelo = model_cache[model_id]
     else:
         model_path = os.path.join(MODEL_DIR, f"modelo_{model_id}.pkl")
         if not os.path.exists(model_path):
             # 404 real: antes devolvía {"error": ...} con status 200, lo que hacía
-            # que el frontend lo tratara como una respuesta exitosa y mostrara un
-            # mensaje genérico en vez de explicar que el modelo no existe.
+            # que el frontend lo tratara como éxito y mostrara un mensaje genérico
+            # en vez de explicar que el modelo no existe.
             raise HTTPException(
                 status_code=404,
                 detail=f"Modelo '{model_id}' no encontrado. Puede que el servidor se haya "
                        f"reiniciado y haya perdido los modelos entrenados, o que el ID sea "
                        f"incorrecto."
             )
-        model = joblib.load(model_path)
-        model_cache[model_id] = model
+        modelo = joblib.load(model_path)
+        model_cache[model_id] = modelo
+
+    # Modelos entrenados con una versión anterior (LogisticRegression + embeddings)
+    # no son compatibles con este formato nuevo: son inservibles de todos modos,
+    # porque esa versión anterior tenía el bug que predecía siempre la misma
+    # categoría. Mejor avisar claro que fallar con un error críptico.
+    if not (isinstance(modelo, dict) and modelo.get("tipo") == "similaridad-hf-v1"):
+        raise HTTPException(
+            status_code=410,
+            detail=f"El modelo '{model_id}' fue entrenado con una versión anterior "
+                   f"del sistema y ya no es compatible. Volvé a entrenarlo."
+        )
 
     try:
-        vec = embed_texts([data.texto])
+        categoria, scores_por_categoria = categoria_mas_similar(data.texto, modelo["ejemplos"])
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    categoria = model.predict(vec)[0]
-    return {"categoria": categoria, "boot_id": SERVER_BOOT_ID}
+    return {
+        "categoria": categoria,
+        "similitud": round(scores_por_categoria[categoria], 4),
+        "boot_id": SERVER_BOOT_ID
+    }
